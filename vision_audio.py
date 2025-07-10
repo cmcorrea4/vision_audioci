@@ -144,7 +144,7 @@ def analyze_image_with_openai(image_data: bytes, products_df: pd.DataFrame) -> D
         """
         
         response = client.chat.completions.create(
-            model="gpt-4-vision-preview",
+            model="gpt-4o-mini",
             messages=[
                 {
                     "role": "user",
