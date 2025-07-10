@@ -206,7 +206,9 @@ def find_similar_products(product_description: str, products_df: pd.DataFrame, m
     
     # Ordenar por score y retornar los mejores
     matches = sorted(matches, key=lambda x: x['score'], reverse=True)
-    return matches[:max_results]import streamlit as st
+    return matches[:max_results]
+    
+import streamlit as st
 import pandas as pd
 import openai
 from openai import OpenAI
