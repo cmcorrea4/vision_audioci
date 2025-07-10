@@ -1,213 +1,3 @@
-def analyze_image_with_openai(image_data: bytes, products_df: pd.DataFrame) -> Dict[str, Any]:
-    """Analiza una imagen con lista de productos usando la API de OpenAI Vision"""
-    if not api_key:
-        return {"error": "API Key no configurada"}
-    
-    try:
-        # Convertir imagen a base64
-        base64_image = base64.b64encode(image_data).decode('utf-8')
-        
-        # Prompt específico para extraer listas de productos
-        prompt = f"""
-        Analiza esta imagen que contiene una lista de productos de madera (factura, cotización, lista de materiales, etc.).
-        
-        Extrae TODOS los productos de madera mencionados en la imagen con sus:
-        - Nombre/descripción del producto
-        - Dimensiones (si están visibles)
-        - Cantidades
-        - Cualquier especificación técnica
-        
-        Responde en formato JSON con:
-        {{
-            "productos_encontrados": [
-                {{
-                    "descripcion": "nombre del producto extraído",
-                    "dimensiones": "dimensiones si están visibles",
-                    "cantidad": "cantidad si está visible",
-                    "especificaciones": "otras especificaciones"
-                }}
-            ],
-            "texto_completo": "todo el texto relevante extraído de la imagen",
-            "tipo_documento": "factura/cotización/lista/otro"
-        }}
-        
-        Enfócate en extraer TODOS los productos de madera, tablones, tablas, estacones, alfardas, etc.
-        """
-        
-        response = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": prompt},
-                        {
-                            "type": "image_url",
-                            "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}
-                        }
-                    ]
-                }
-            ],
-            max_tokens=2000
-        )
-        
-        # Intentar parsear la respuesta como JSON
-        try:
-            result = json.loads(response.choices[0].message.content)
-            
-            # Agregar matching con catálogo para cada producto encontrado
-            if "productos_encontrados" in result:
-                for producto in result["productos_encontrados"]:
-                    matches = find_similar_products(producto["descripcion"], products_df)
-                    producto["productos_similares"] = matches
-            
-            return result
-            
-        except json.JSONDecodeError:
-            return {
-                "productos_encontrados": [],
-                "texto_extraido": response.choices[0].message.content,
-                "error_parsing": "No se pudo parsear como JSON"
-            }
-            
-    except Exception as e:
-        return {"error": f"Error en análisis de imagen: {str(e)}"}
-
-def analyze_audio_with_openai(audio_data: bytes, products_df: pd.DataFrame) -> Dict[str, Any]:
-    """Analiza audio con lista de productos usando la API de OpenAI Whisper"""
-    if not api_key:
-        return {"error": "API Key no configurada"}
-    
-    try:
-        # Crear archivo temporal en memoria
-        audio_file = io.BytesIO(audio_data)
-        audio_file.name = "audio.wav"
-        
-        # Transcribir audio
-        transcript = client.audio.transcriptions.create(
-            model="whisper-1",
-            file=audio_file
-        )
-        
-        # Analizar transcripción para extraer productos
-        prompt = f"""
-        Analiza esta transcripción de audio que contiene una lista de productos de madera.
-        
-        Transcripción: "{transcript.text}"
-        
-        Extrae TODOS los productos de madera mencionados con:
-        - Nombre/descripción
-        - Dimensiones mencionadas
-        - Cantidades
-        - Especificaciones
-        
-        Responde en formato JSON con:
-        {{
-            "transcripcion_completa": "texto completo transcrito",
-            "productos_mencionados": [
-                {{
-                    "descripcion": "producto mencionado",
-                    "dimensiones": "dimensiones si se mencionan",
-                    "cantidad": "cantidad si se menciona",
-                    "especificaciones": "otras especificaciones"
-                }}
-            ],
-            "contexto": "tipo de pedido/consulta/lista"
-        }}
-        """
-        
-        response = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=1500
-        )
-        
-        try:
-            result = json.loads(response.choices[0].message.content)
-            
-            # Agregar matching con catálogo para cada producto mencionado
-            if "productos_mencionados" in result:
-                for producto in result["productos_mencionados"]:
-                    matches = find_similar_products(producto["descripcion"], products_df)
-                    producto["productos_similares"] = matches
-            
-            return result
-            
-        except json.JSONDecodeError:
-            return {
-                "transcripcion_completa": transcript.text,
-                "analisis": response.choices[0].message.content
-            }
-            
-    except Exception as e:
-        return {"error": f"Error en análisis de audio: {str(e)}"}
-
-def find_similar_products(product_description: str, products_df: pd.DataFrame, max_results: int = 3) -> List[Dict[str, Any]]:
-    """Encuentra productos similares en el catálogo basado en descripción"""
-    description = product_description.lower()
-    
-    # Detectar columna de tipo
-    tipo_col = 'TIPO MADERA' if 'TIPO MADERA' in products_df.columns else 'TIPO_MADERA'
-    
-    # Buscar coincidencias por palabras clave
-    matches = []
-    
-    for _, row in products_df.iterrows():
-        score = 0
-        reasons = []
-        
-        # Buscar en descripción
-        if pd.notna(row['DESCRIPCION']):
-            desc_words = row['DESCRIPCION'].lower().split()
-            input_words = description.split()
-            
-            common_words = set(desc_words) & set(input_words)
-            if common_words:
-                score += len(common_words)
-                reasons.append(f"Palabras coincidentes: {', '.join(common_words)}")
-        
-        # Buscar palabras clave específicas
-        keywords = {
-            'tabla': ['tabla', 'tablilla', 'tablon'],
-            'deck': ['deck'],
-            'piso': ['piso', 'pared'],
-            'alfarda': ['alfarda'],
-            'estacon': ['estacon', 'calibrado'],
-            'columna': ['columna'],
-            'vareta': ['vareta', 'varillon']
-        }
-        
-        for category, words in keywords.items():
-            if any(word in description for word in words):
-                if any(word in row['DESCRIPCION'].lower() for word in words):
-                    score += 5
-                    reasons.append(f"Categoría: {category}")
-        
-        # Buscar dimensiones (formato NxNxN)
-        import re
-        dim_pattern = r'(\d+\.?\d*)[xX](\d+\.?\d*)[xX]?(\d+\.?\d*)?'
-        input_dims = re.findall(dim_pattern, description)
-        desc_dims = re.findall(dim_pattern, row['DESCRIPCION'].lower())
-        
-        if input_dims and desc_dims:
-            if any(dim in desc_dims for dim in input_dims):
-                score += 10
-                reasons.append("Dimensiones similares")
-        
-        if score > 0:
-            matches.append({
-                'referencia': row['Referencia'],
-                'descripcion': row['DESCRIPCION'],
-                'tipo': row[tipo_col],
-                'precio': row['PRECIO_CALDAS'] if pd.notna(row['PRECIO_CALDAS']) else 'No disponible',
-                'score': score,
-                'razones': '; '.join(reasons)
-            })
-    
-    # Ordenar por score y retornar los mejores
-    matches = sorted(matches, key=lambda x: x['score'], reverse=True)
-    return matches[:max_results]
-    
 import streamlit as st
 import pandas as pd
 import openai
@@ -341,9 +131,73 @@ def load_product_data():
         }
         return pd.DataFrame(sample_data)
 
-# Funciones de análisis con OpenAI
+def find_similar_products(product_description: str, products_df: pd.DataFrame, max_results: int = 3) -> List[Dict[str, Any]]:
+    """Encuentra productos similares en el catálogo basado en descripción"""
+    description = product_description.lower()
+    
+    # Detectar columna de tipo
+    tipo_col = 'TIPO MADERA' if 'TIPO MADERA' in products_df.columns else 'TIPO_MADERA'
+    
+    # Buscar coincidencias por palabras clave
+    matches = []
+    
+    for _, row in products_df.iterrows():
+        score = 0
+        reasons = []
+        
+        # Buscar en descripción
+        if pd.notna(row['DESCRIPCION']):
+            desc_words = row['DESCRIPCION'].lower().split()
+            input_words = description.split()
+            
+            common_words = set(desc_words) & set(input_words)
+            if common_words:
+                score += len(common_words)
+                reasons.append(f"Palabras coincidentes: {', '.join(common_words)}")
+        
+        # Buscar palabras clave específicas
+        keywords = {
+            'tabla': ['tabla', 'tablilla', 'tablon'],
+            'deck': ['deck'],
+            'piso': ['piso', 'pared'],
+            'alfarda': ['alfarda'],
+            'estacon': ['estacon', 'calibrado'],
+            'columna': ['columna'],
+            'vareta': ['vareta', 'varillon']
+        }
+        
+        for category, words in keywords.items():
+            if any(word in description for word in words):
+                if any(word in row['DESCRIPCION'].lower() for word in words):
+                    score += 5
+                    reasons.append(f"Categoría: {category}")
+        
+        # Buscar dimensiones (formato NxNxN)
+        dim_pattern = r'(\d+\.?\d*)[xX](\d+\.?\d*)[xX]?(\d+\.?\d*)?'
+        input_dims = re.findall(dim_pattern, description)
+        desc_dims = re.findall(dim_pattern, row['DESCRIPCION'].lower())
+        
+        if input_dims and desc_dims:
+            if any(dim in desc_dims for dim in input_dims):
+                score += 10
+                reasons.append("Dimensiones similares")
+        
+        if score > 0:
+            matches.append({
+                'referencia': row['Referencia'],
+                'descripcion': row['DESCRIPCION'],
+                'tipo': row[tipo_col],
+                'precio': row['PRECIO_CALDAS'] if pd.notna(row['PRECIO_CALDAS']) else 'No disponible',
+                'score': score,
+                'razones': '; '.join(reasons)
+            })
+    
+    # Ordenar por score y retornar los mejores
+    matches = sorted(matches, key=lambda x: x['score'], reverse=True)
+    return matches[:max_results]
+
 def analyze_image_with_openai(image_data: bytes, products_df: pd.DataFrame) -> Dict[str, Any]:
-    """Analiza una imagen usando la API de OpenAI Vision"""
+    """Analiza una imagen con lista de productos usando la API de OpenAI Vision"""
     if not api_key:
         return {"error": "API Key no configurada"}
     
@@ -351,41 +205,35 @@ def analyze_image_with_openai(image_data: bytes, products_df: pd.DataFrame) -> D
         # Convertir imagen a base64
         base64_image = base64.b64encode(image_data).decode('utf-8')
         
-        # Crear descripción de productos para el contexto
-        products_context = create_products_context(products_df)
+        # Prompt específico para extraer listas de productos
+        prompt = """
+        Analiza esta imagen que contiene una lista de productos de madera (factura, cotización, lista de materiales, etc.).
         
-        # Prompt para análisis de imagen
-        prompt = f"""
-        Analiza esta imagen e identifica cualquier elemento relacionado con productos de madera.
-        Busca específicamente:
-        - Tipo de madera (aserrada, cilindrada, etc.)
-        - Dimensiones visibles
-        - Acabados (cepillado, calibrado, rústico, etc.)
-        - Usos posibles (construcción, cercas, cultivos, etc.)
-        - Características distintivas
-        
-        Productos disponibles en nuestra base de datos:
-        {products_context}
+        Extrae TODOS los productos de madera mencionados en la imagen con sus:
+        - Nombre/descripción del producto
+        - Dimensiones (si están visibles)
+        - Cantidades
+        - Cualquier especificación técnica
         
         Responde en formato JSON con:
-        {{
-            "elementos_identificados": ["lista de elementos encontrados"],
-            "tipo_madera_probable": "tipo identificado",
-            "dimensiones_estimadas": "dimensiones si son visibles",
-            "uso_sugerido": "uso probable",
-            "productos_relacionados": [
-                {{
-                    "referencia": "código",
-                    "descripcion": "descripción del producto",
-                    "confianza": "porcentaje de confianza",
-                    "justificacion": "por qué coincide"
-                }}
-            ]
-        }}
+        {
+            "productos_encontrados": [
+                {
+                    "descripcion": "nombre del producto extraído",
+                    "dimensiones": "dimensiones si están visibles",
+                    "cantidad": "cantidad si está visible",
+                    "especificaciones": "otras especificaciones"
+                }
+            ],
+            "texto_completo": "todo el texto relevante extraído de la imagen",
+            "tipo_documento": "factura/cotización/lista/otro"
+        }
+        
+        Enfócate en extraer TODOS los productos de madera, tablones, tablas, estacones, alfardas, etc.
         """
         
         response = client.chat.completions.create(
-            model="gpt-4-vision-preview",
+            model="gpt-4o-mini",
             messages=[
                 {
                     "role": "user",
@@ -398,31 +246,40 @@ def analyze_image_with_openai(image_data: bytes, products_df: pd.DataFrame) -> D
                     ]
                 }
             ],
-            max_tokens=1500
+            max_tokens=2000
         )
         
         # Intentar parsear la respuesta como JSON
         try:
             result = json.loads(response.choices[0].message.content)
+            
+            # Agregar matching con catálogo para cada producto encontrado
+            if "productos_encontrados" in result:
+                for producto in result["productos_encontrados"]:
+                    matches = find_similar_products(producto["descripcion"], products_df)
+                    producto["productos_similares"] = matches
+            
             return result
+            
         except json.JSONDecodeError:
             return {
-                "elementos_identificados": ["Análisis textual disponible"],
-                "descripcion_general": response.choices[0].message.content
+                "productos_encontrados": [],
+                "texto_extraido": response.choices[0].message.content,
+                "error_parsing": "No se pudo parsear como JSON"
             }
             
     except Exception as e:
         return {"error": f"Error en análisis de imagen: {str(e)}"}
 
 def analyze_audio_with_openai(audio_data: bytes, products_df: pd.DataFrame) -> Dict[str, Any]:
-    """Analiza audio usando la API de OpenAI Whisper"""
+    """Analiza audio con lista de productos usando la API de OpenAI Whisper"""
     if not api_key:
         return {"error": "API Key no configurada"}
     
     try:
         # Crear archivo temporal en memoria
         audio_file = io.BytesIO(audio_data)
-        audio_file.name = "audio.wav"  # OpenAI necesita un nombre con extensión
+        audio_file.name = "audio.wav"
         
         # Transcribir audio
         transcript = client.audio.transcriptions.create(
@@ -430,45 +287,53 @@ def analyze_audio_with_openai(audio_data: bytes, products_df: pd.DataFrame) -> D
             file=audio_file
         )
         
-        # Analizar transcripción
-        products_context = create_products_context(products_df)
-        
+        # Analizar transcripción para extraer productos
         prompt = f"""
-        Analiza esta transcripción de audio y encuentra referencias a productos de madera:
+        Analiza esta transcripción de audio que contiene una lista de productos de madera.
         
         Transcripción: "{transcript.text}"
         
-        Productos disponibles:
-        {products_context}
+        Extrae TODOS los productos de madera mencionados con:
+        - Nombre/descripción
+        - Dimensiones mencionadas
+        - Cantidades
+        - Especificaciones
         
         Responde en formato JSON con:
         {{
-            "transcripcion": "texto transcrito",
-            "palabras_clave": ["palabras relacionadas con madera"],
-            "productos_mencionados": ["productos específicos mencionados"],
-            "productos_relacionados": [
+            "transcripcion_completa": "texto completo transcrito",
+            "productos_mencionados": [
                 {{
-                    "referencia": "código",
-                    "descripcion": "descripción",
-                    "confianza": "porcentaje",
-                    "justificacion": "por qué coincide"
+                    "descripcion": "producto mencionado",
+                    "dimensiones": "dimensiones si se mencionan",
+                    "cantidad": "cantidad si se menciona",
+                    "especificaciones": "otras especificaciones"
                 }}
-            ]
+            ],
+            "contexto": "tipo de pedido/consulta/lista"
         }}
         """
         
         response = client.chat.completions.create(
-            model="gpt-4",
+            model="gpt-4o-mini",
             messages=[{"role": "user", "content": prompt}],
-            max_tokens=1000
+            max_tokens=1500
         )
         
         try:
             result = json.loads(response.choices[0].message.content)
+            
+            # Agregar matching con catálogo para cada producto mencionado
+            if "productos_mencionados" in result:
+                for producto in result["productos_mencionados"]:
+                    matches = find_similar_products(producto["descripcion"], products_df)
+                    producto["productos_similares"] = matches
+            
             return result
+            
         except json.JSONDecodeError:
             return {
-                "transcripcion": transcript.text,
+                "transcripcion_completa": transcript.text,
                 "analisis": response.choices[0].message.content
             }
             
@@ -549,16 +414,16 @@ with col1:
                             
                             for i, producto in enumerate(result["productos_encontrados"], 1):
                                 with st.expander(f"📦 Producto {i}: {producto.get('descripcion', 'Sin descripción')[:50]}..."):
-                                    col1, col2 = st.columns([1, 1])
+                                    col1_inner, col2_inner = st.columns([1, 1])
                                     
-                                    with col1:
+                                    with col1_inner:
                                         st.write("**Información Extraída:**")
                                         st.write(f"• **Descripción:** {producto.get('descripcion', 'N/A')}")
                                         st.write(f"• **Dimensiones:** {producto.get('dimensiones', 'N/A')}")
                                         st.write(f"• **Cantidad:** {producto.get('cantidad', 'N/A')}")
                                         st.write(f"• **Especificaciones:** {producto.get('especificaciones', 'N/A')}")
                                     
-                                    with col2:
+                                    with col2_inner:
                                         st.write("**Productos Similares en Catálogo:**")
                                         if "productos_similares" in producto and producto["productos_similares"]:
                                             for match in producto["productos_similares"]:
@@ -614,16 +479,16 @@ with col1:
                             
                             for i, producto in enumerate(result["productos_mencionados"], 1):
                                 with st.expander(f"🎤 Producto {i}: {producto.get('descripcion', 'Sin descripción')[:50]}..."):
-                                    col1, col2 = st.columns([1, 1])
+                                    col1_inner, col2_inner = st.columns([1, 1])
                                     
-                                    with col1:
+                                    with col1_inner:
                                         st.write("**Información Mencionada:**")
                                         st.write(f"• **Descripción:** {producto.get('descripcion', 'N/A')}")
                                         st.write(f"• **Dimensiones:** {producto.get('dimensiones', 'N/A')}")
                                         st.write(f"• **Cantidad:** {producto.get('cantidad', 'N/A')}")
                                         st.write(f"• **Especificaciones:** {producto.get('especificaciones', 'N/A')}")
                                     
-                                    with col2:
+                                    with col2_inner:
                                         st.write("**Productos Similares en Catálogo:**")
                                         if "productos_similares" in producto and producto["productos_similares"]:
                                             for match in producto["productos_similares"]:
